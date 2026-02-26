@@ -29,6 +29,11 @@ const oscState = {
   currentStep:    0,               // 0-based tutorial step
 };
 
+// Probe grab state (desktop drag-and-plug)
+let probeGrabbed = false;
+const _probeDragPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+const _probeDragHit   = new THREE.Vector3();
+
 // Tutorial steps: id, title, instruction, which control to highlight
 const STEPS = [
   { id: 0, title: "Step 1 – Power On",      desc: "Press the POWER button (top-left) to turn the oscilloscope on.",                    highlight: "power"    },
@@ -375,12 +380,14 @@ function drawGraticule(c, W, H) {
 //  BUILD OSCILLOSCOPE  (procedural 3D model)
 // ─────────────────────────────────────────────────────────────────────────────
 const oscGroup = new THREE.Group();
-// Sit on bench top: BENCH_Y + BH/2 centre
-oscGroup.position.set(0, BENCH_Y + 0.17, -0.3);
+// Sit on bench top – scale 0.72 so effective half-height = 0.24 * 0.72 ≈ 0.173
+const OSC_SCALE = 0.72;
+oscGroup.scale.setScalar(OSC_SCALE);
+oscGroup.position.set(0, BENCH_Y + 0.24 * OSC_SCALE, -0.3);
 scene.add(oscGroup);
 
 // Dimensions  (table-scale)
-const BW = 0.52, BH = 0.34, BD = 0.40; // body width / height / depth
+const BW = 0.52, BH = 0.48, BD = 0.40; // body width / height / depth
 
 // ── Body ─────────────────────────────────────────────────────────────────────
 const bodyMat = new THREE.MeshStandardMaterial({ color: 0x18202e, roughness: 0.45, metalness: 0.35 });
@@ -511,7 +518,7 @@ function knobLabel(cx, cy, text) {
 
 // ── Layout constants (right panel x, rows y) ─────────────────────────────────
 const PX = 0.175; // x centre of control panel (right side)
-const ROW = (n) => 0.13 - n * 0.085; // rows from top
+const ROW = (n) => 0.20 - n * 0.070; // rows from top – fits all 7 rows in taller body
 
 // ── POWER button ──────────────────────────────────────────────────────────────
 const powerBtn = makeButton(PX, ROW(0), 0.072, 0.042, "PWR", "#1a3a1a", "#44ff88",
@@ -603,7 +610,7 @@ const cableMesh = new THREE.Mesh(
 );
 oscGroup.add(cableMesh);
 
-// Probe tip
+// Probe tip (static, part of resting cable)
 const probeTip = new THREE.Mesh(
   new THREE.ConeGeometry(0.003, 0.018, 8),
   new THREE.MeshStandardMaterial({ color: 0xcc2222, roughness: 0.4 })
@@ -611,6 +618,69 @@ const probeTip = new THREE.Mesh(
 probeTip.rotation.x = -Math.PI / 2;
 probeTip.position.copy(cablePts[cablePts.length - 1]).add(new THREE.Vector3(0, 0, 0.01));
 oscGroup.add(probeTip);
+
+// ── Grabbable probe head ───────────────────────────────────────────────────
+// Resting position = just past the cable tip
+const PROBE_REST = cablePts[cablePts.length - 1].clone().add(new THREE.Vector3(0, 0, 0.018));
+
+const grabbableProbe = new THREE.Group();
+// Handle body
+const _gpBody = new THREE.Mesh(
+  new THREE.CylinderGeometry(0.007, 0.010, 0.055, 12),
+  new THREE.MeshStandardMaterial({ color: 0x1a1a33, roughness: 0.4, metalness: 0.3 })
+);
+_gpBody.rotation.x = Math.PI / 2;
+grabbableProbe.add(_gpBody);
+// Gold BNC connector (back end, faces the port)
+const _gpBNC = new THREE.Mesh(
+  new THREE.CylinderGeometry(0.006, 0.006, 0.014, 10),
+  new THREE.MeshStandardMaterial({ color: 0xccaa22, roughness: 0.25, metalness: 0.85 })
+);
+_gpBNC.rotation.x = Math.PI / 2;
+_gpBNC.position.z = -0.035;
+grabbableProbe.add(_gpBNC);
+// Red tip (front)
+const _gpTip = new THREE.Mesh(
+  new THREE.ConeGeometry(0.003, 0.018, 8),
+  new THREE.MeshStandardMaterial({ color: 0xdd2222, roughness: 0.3 })
+);
+_gpTip.rotation.x = -Math.PI / 2;
+_gpTip.position.z = 0.037;
+grabbableProbe.add(_gpTip);
+// "GRAB" hint label
+{
+  const cv = document.createElement("canvas"); cv.width = 280; cv.height = 64;
+  const c = cv.getContext("2d");
+  c.fillStyle = "rgba(0,0,0,0)"; c.fillRect(0, 0, 280, 64);
+  c.fillStyle = "#00ddff"; c.font = "bold 24px Arial"; c.textAlign = "center";
+  c.fillText("\u25BC GRAB PROBE", 140, 46);
+  const grabLabel = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.11, 0.025),
+    new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(cv), transparent: true, depthTest: false })
+  );
+  grabLabel.position.set(0, 0.052, 0);
+  grabbableProbe.add(grabLabel);
+}
+grabbableProbe.position.copy(PROBE_REST);
+oscGroup.add(grabbableProbe);
+grabbableProbe.userData = { ctrlType: "probe_body", label: "PROBE – click to grab" };
+interactives.push({ mesh: grabbableProbe, ctrlType: "probe_body", label: "PROBE – click to grab" });
+
+// ── CH1 snap-target ring (pulses when probe is in hand) ───────────────────
+const ch1Ring = new THREE.Mesh(
+  new THREE.RingGeometry(0.019, 0.027, 28),
+  new THREE.MeshBasicMaterial({ color: 0x00ff88, transparent: true, opacity: 0.0, side: THREE.DoubleSide, depthTest: false })
+);
+ch1Ring.position.set(-0.16, -0.13, BD / 2 + 0.014);
+oscGroup.add(ch1Ring);
+
+// ── CH1 connection LED (small dot above BNC port) ────────────────────────
+const ch1LED = new THREE.Mesh(
+  new THREE.CircleGeometry(0.005, 12),
+  new THREE.MeshBasicMaterial({ color: 0x222222 })
+);
+ch1LED.position.set(-0.16, -0.103, BD / 2 + 0.002);
+oscGroup.add(ch1LED);
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  INSTRUCTION BOARDS  (two panels side-by-side, fully above the bench)
@@ -765,6 +835,38 @@ function showToast(text) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  PROBE CONNECT / DISCONNECT HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+function snapProbeToCH1() {
+  probeGrabbed = false;
+  oscState.probeConnected = true;
+  // Snap probe visually into the BNC port
+  grabbableProbe.position.set(-0.16, -0.13, BD / 2 + 0.010);
+  ch1Body.material.color.setHex(0x44cc88);
+  ch1LED.material.color.setHex(0x44ff88);
+  ch1Ring.material.opacity = 0;
+  probeMesh.visible  = true;
+  cableMesh.visible  = true;
+  probeTip.visible   = false;
+  document.body.style.cursor = "default";
+  showToast("\u2714 Probe connected – CH1");
+  advanceStep("ch1");
+  playClick();
+}
+
+function unplugProbe() {
+  oscState.probeConnected = false;
+  probeGrabbed = false;
+  grabbableProbe.position.copy(PROBE_REST);
+  ch1Body.material.color.setHex(0xccaa22);
+  ch1LED.material.color.setHex(0x222222);
+  probeMesh.visible  = false;
+  cableMesh.visible  = true;
+  probeTip.visible   = true;
+  showToast("Probe disconnected");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  CONTROL INTERACTION LOGIC
 // ─────────────────────────────────────────────────────────────────────────────
 function advanceStep(ctrlType) {
@@ -818,12 +920,35 @@ function handleControl(ctrlType, extra = {}) {
       advanceStep("power");
       break;
 
+    case "probe_body":
+      if (oscState.probeConnected) {
+        unplugProbe();
+      } else {
+        probeGrabbed = !probeGrabbed;
+        if (probeGrabbed) {
+          showToast("Probe grabbed – move to the CH1 port ▶");
+          cableMesh.visible = false;
+          probeTip.visible  = false;
+          document.body.style.cursor = "grabbing";
+        } else {
+          grabbableProbe.position.copy(PROBE_REST);
+          cableMesh.visible = true;
+          probeTip.visible  = true;
+          document.body.style.cursor = "default";
+          showToast("Probe released");
+        }
+      }
+      break;
+
     case "ch1":
-      oscState.probeConnected = !oscState.probeConnected;
-      probeMesh.visible = oscState.probeConnected;
-      ch1Body.material.color.setHex(oscState.probeConnected ? 0x44cc88 : 0xccaa22);
-      showToast(oscState.probeConnected ? "Probe Connected – CH1" : "Probe removed");
-      advanceStep("ch1");
+      // XR / direct BNC-port click
+      if (oscState.probeConnected) {
+        unplugProbe();
+      } else if (probeGrabbed) {
+        snapProbeToCH1();
+      } else {
+        showToast("Grab the probe first, then insert into CH1");
+      }
       break;
 
     case "wave":
@@ -832,23 +957,29 @@ function handleControl(ctrlType, extra = {}) {
       advanceStep("wave");
       break;
 
-    case "timebase":
-      oscState.timebaseIdx = (oscState.timebaseIdx + 1) % TIMEBASE_VALUES.length;
+    case "timebase": {
+      const dir = extra.dir ?? 1;
+      oscState.timebaseIdx = (oscState.timebaseIdx + dir + TIMEBASE_VALUES.length) % TIMEBASE_VALUES.length;
       showToast(`Timebase: ${TIMEBASE_VALUES[oscState.timebaseIdx]} ms/div`);
       advanceStep("timebase");
       break;
+    }
 
-    case "vdiv":
-      oscState.vdivIdx = (oscState.vdivIdx + 1) % VDIV_VALUES.length;
+    case "vdiv": {
+      const dir = extra.dir ?? 1;
+      oscState.vdivIdx = (oscState.vdivIdx + dir + VDIV_VALUES.length) % VDIV_VALUES.length;
       showToast(`V/DIV: ${VDIV_VALUES[oscState.vdivIdx]} V`);
       advanceStep("vdiv");
       break;
+    }
 
-    case "trigger":
-      oscState.triggerIdx = (oscState.triggerIdx + 1) % TRIGGER_VALUES.length;
+    case "trigger": {
+      const dir = extra.dir ?? 1;
+      oscState.triggerIdx = (oscState.triggerIdx + dir + TRIGGER_VALUES.length) % TRIGGER_VALUES.length;
       showToast(`Trigger: ${TRIGGER_VALUES[oscState.triggerIdx] >= 0 ? "+" : ""}${TRIGGER_VALUES[oscState.triggerIdx]} div`);
       advanceStep("trigger");
       break;
+    }
 
     case "runstop":
       oscState.isRunning = !oscState.isRunning;
@@ -1027,19 +1158,51 @@ function animate() {
     }
   }
 
+  // CH1 target ring – pulse green when probe is grabbed
+  if (probeGrabbed && !oscState.probeConnected) {
+    ch1Ring.material.opacity = 0.45 + 0.4 * Math.sin(t * 9);
+  } else {
+    ch1Ring.material.opacity = 0;
+  }
+
   if (!renderer.xr.isPresenting) {
-    controls.update();
-    // Mouse hover
-    raycaster.setFromCamera(mouse, camera);
-    const intr = fireRayOnMeshes(getInteractiveMeshes());
-    document.body.style.cursor = intr ? "pointer" : "default";
-    if (intr) {
-      const worldPos = new THREE.Vector3();
-      intr.mesh.getWorldPosition(worldPos);
-      highlightRing.position.copy(worldPos);
-      highlightRing.visible = true;
-      highlightRing.material.opacity = 0.55 + 0.3 * Math.sin(t * 5);
-      highlightRing.lookAt(camera.position);
+    // ── Probe drag: follow mouse on oscilloscope front-face plane ──────────
+    if (probeGrabbed && !oscState.probeConnected) {
+      const planeAnchor = new THREE.Vector3();
+      oscGroup.localToWorld(planeAnchor.set(0, 0, BD / 2 + 0.06));
+      _probeDragPlane.setFromNormalAndCoplanarPoint(new THREE.Vector3(0, 0, 1), planeAnchor);
+      raycaster.setFromCamera(mouse, camera);
+      if (raycaster.ray.intersectPlane(_probeDragPlane, _probeDragHit)) {
+        const localPos = _probeDragHit.clone();
+        oscGroup.worldToLocal(localPos);
+        localPos.x = THREE.MathUtils.clamp(localPos.x, -BW / 2 + 0.02, BW / 2 - 0.02);
+        localPos.y = THREE.MathUtils.clamp(localPos.y, -BH / 2 + 0.02, BH / 2 - 0.02);
+        localPos.z = BD / 2 + 0.022;
+        grabbableProbe.position.copy(localPos);
+      }
+      // Auto-snap when BNC end is near the CH1 port
+      const ch1World   = new THREE.Vector3();
+      ch1Body.getWorldPosition(ch1World);
+      const probeWorld = new THREE.Vector3();
+      grabbableProbe.getWorldPosition(probeWorld);
+      if (probeWorld.distanceTo(ch1World) < 0.072) {
+        snapProbeToCH1();
+      }
+      document.body.style.cursor = "grabbing";
+    } else {
+      controls.update();
+      // Mouse hover highlight
+      raycaster.setFromCamera(mouse, camera);
+      const intr = fireRayOnMeshes(getInteractiveMeshes());
+      document.body.style.cursor = intr ? "pointer" : "default";
+      if (intr) {
+        const worldPos = new THREE.Vector3();
+        intr.mesh.getWorldPosition(worldPos);
+        highlightRing.position.copy(worldPos);
+        highlightRing.visible = true;
+        highlightRing.material.opacity = 0.55 + 0.3 * Math.sin(t * 5);
+        highlightRing.lookAt(camera.position);
+      }
     }
   }
 
@@ -1058,7 +1221,18 @@ window.addEventListener("click", () => {
   if (renderer.xr.isPresenting) return;
   raycaster.setFromCamera(mouse, camera);
   const intr = fireRayOnMeshes(getInteractiveMeshes());
-  if (intr) { playClick(); handleControl(intr.ctrlType, intr); }
+  if (intr) {
+    playClick();
+    handleControl(intr.ctrlType, intr);
+  } else if (probeGrabbed) {
+    // Click on empty space → drop probe back to rest
+    probeGrabbed = false;
+    grabbableProbe.position.copy(PROBE_REST);
+    cableMesh.visible = true;
+    probeTip.visible  = true;
+    document.body.style.cursor = "default";
+    showToast("Probe released");
+  }
 });
 
 window.addEventListener("resize", () => {
